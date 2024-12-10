@@ -48,7 +48,6 @@ get_gain(std::string board, std::string channel, std::string step, int marker, i
   return ggain;
 }
 
-  
 void
 dump_filenames(std::string fname)
 {
@@ -87,7 +86,6 @@ get_iv_scan(std::string board, std::string channel, std::string step, int marker
   graphutils::set_style(g, marker, color);
   return g;
 }
-
 
 std::map<std::string, std::string>
 get_filename(std::string board, std::string channel, std::string step)
