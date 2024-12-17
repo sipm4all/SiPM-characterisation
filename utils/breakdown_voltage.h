@@ -1,13 +1,26 @@
 #pragma once
-//  List of methods to determine the breakdwon voltage in a I-V curve
-//  methods taken from https://arxiv.org/abs/1606.07805
-//
-//  !TODO: Clean-up graph utils and make new general util repository
-//
-typedef std::map<std::string, std::map<std::string, std::map<std::string, std::array<double, 2>>>> breakdown_voltages_type;
-typedef std::map<std::string, std::map<std::string, std::map<std::string, std::map<std::string, std::array<double, 2>>>>> breakdown_voltages_sensors_type;
-//
-std::array<double, 2> find_vbd_guess(TGraphErrors *gLogTarget)
+
+#include "general_utility.h"
+
+// TODO: clean.up in another header
+std::array<std::array<float, 2>, 2> get_intercept(TF1 *pol1, TF1 *pol2) { return utility::get_intercept(pol1->GetParameter(1), pol1->GetParError(1), pol1->GetParameter(0), pol1->GetParError(0), pol2->GetParameter(1), pol2->GetParError(1), pol2->GetParameter(0), pol2->GetParError(0)); }
+std::array<std::array<float, 2>, 2> get_intercept_x(TF1 *pol1) { return utility::get_intercept_x(pol1->GetParameter(1), pol1->GetParError(1), pol1->GetParameter(0), pol1->GetParError(0)); }
+
+namespace breakdown_voltage
+{
+    //  Basic method to find a first Vbd guess
+    std::array<double, 2> find_vbd_guess(TGraphErrors *gLogTarget, float threshold = 0.35);
+
+    //  Implemented methods to measure Vbd
+    std::array<float, 2> measure_breakdown_0(TGraphErrors *gTarget, std::string image_folder = "", float threshold_guess = 0.75, bool erf_mediate = true, float min_before_fit = 5., float max_before_fit = 0.2, float min_after_fit = 0.2, float max_after_fit = 1.);
+    std::array<float, 2> measure_breakdown_1(TGraphErrors *gTarget, std::string image_folder = "", float threshold_guess = 0.75);
+    std::array<float, 2> measure_breakdown_2(TGraphErrors *gTarget, std::string image_folder = "", float threshold_guess = 0.75);
+    std::array<float, 2> measure_breakdown_3(TGraphErrors *gTarget, std::string image_folder = "", float threshold_guess = 0.75);
+    std::array<float, 2> measure_breakdown_4(TGraphErrors *gTarget, std::string image_folder = "", float threshold_guess = 0.75);
+    std::array<float, 2> measure_breakdown_5(TGraphErrors *gTarget, std::string image_folder = "", float threshold_guess = 0.75);
+}
+
+std::array<double, 2> breakdown_voltage::find_vbd_guess(TGraphErrors *gLogTarget, float threshold)
 {
     auto vbd_guess = 0.;
     auto mean_baseline = gLogTarget->GetY()[0];
@@ -15,9 +28,9 @@ std::array<double, 2> find_vbd_guess(TGraphErrors *gLogTarget)
     for (int iPnt = 1; iPnt < gLogTarget->GetN(); iPnt++)
     {
         auto current_Y = gLogTarget->GetY()[iPnt];
-        if (fabs(mean_baseline - current_Y) > 0.35)
+        if (fabs(mean_baseline - current_Y) > threshold)
         {
-            vbd_guess = gLogTarget->GetX()[iPnt-1];
+            vbd_guess = gLogTarget->GetX()[iPnt - 1];
             break;
         }
         mean_baseline *= mean_contributors;
@@ -27,124 +40,490 @@ std::array<double, 2> find_vbd_guess(TGraphErrors *gLogTarget)
     }
     return {vbd_guess, mean_baseline};
 }
-//
-std::pair<float, float> measure_breakdown_0(TGraphErrors *gTarget, float vbd_guess, bool graphics = false)
+
+std::array<float, 2> breakdown_voltage::measure_breakdown_0(TGraphErrors *gTarget, std::string image_folder = "", float threshold_guess = 0.75, bool erf_mediate = true, float min_before_fit = 5., float max_before_fit = 0.2, float min_after_fit = 0.2, float max_after_fit = 1.)
 {
-    //  Create the result pair
-    std::pair<float, float> result = {-1, -1};
+    //  Method 0:
+    //  Linear fit before and after guess of breakdown voltage, take the intersection of the two as the Vbd value
+
+    //  Create result container
+    std::array<float, 2> result = {-1, -1};
+
     //  Make the log graph
     auto log_graph = graphutils::log(gTarget);
+
     //  Calculate a guess for the Vbd and have the measured baseline value
-    auto vbd_guess_baseline = find_vbd_guess(log_graph);
-    vbd_guess = get<0>(vbd_guess_baseline);
-    auto mean_baseline = get<1>(vbd_guess_baseline);
+    auto guess_result = breakdown_voltage::find_vbd_guess(log_graph, threshold_guess);
+    auto vbd_guess = guess_result[0];
+    auto mean_baseline = guess_result[1];
+
     //  Define the functions to find the Vbd
-    TF1 *fbefore = new TF1("fbefore", "[0]+x*[1]");
-    TF1 *fafter = new TF1("fafter", "[0]+x*[1]");
+    TF1 *pol1_before = new TF1("pol1_before", "[0]+x*[1]");
+    TF1 *pol1_after = new TF1("pol1_after", "[0]+x*[1]");
+
     //  Fit before and after the Vbd guess
-    fbefore->SetParameter(0, mean_baseline);
-    fbefore->SetParameter(1, 0.);
-    log_graph->Fit(fbefore, "RQ", "", vbd_guess - 5, vbd_guess - 0.2);
-    fafter->SetParameter(0, -100);
-    fafter->SetParameter(1, 4);
-    log_graph->Fit(fafter, "RQ", "", vbd_guess + 0.2, vbd_guess + 1.);
-    auto intercept_before = fbefore->GetParameter(0);
-    auto angularc_before = fbefore->GetParameter(1);
-    auto intercept_after = fafter->GetParameter(0);
-    auto angularc_after = fafter->GetParameter(1);
-    auto numerator_contribe = sqrt(fbefore->GetParError(0) * fbefore->GetParError(0) + fafter->GetParError(0) * fafter->GetParError(0)) / (intercept_after - intercept_before);
-    auto denominator_contribe = sqrt(fbefore->GetParError(1) * fbefore->GetParError(1) + fafter->GetParError(1) * fafter->GetParError(1)) / (angularc_before - angularc_after);
-    auto intercept_val = get<0>(result) = (intercept_after - intercept_before) / (angularc_before - angularc_after);
-    auto intercept_err = get<1>(result) = get<0>(result) * sqrt(numerator_contribe * numerator_contribe + denominator_contribe * denominator_contribe);
-    TF1 *ffull = new TF1("ffull", "((0.5-0.5*TMath::Erf(((x-[0])/[1])))*([2]+x*[3])+(0.5+0.5*TMath::Erf(((x-[0])/[1])))*([4]+x*[5]))");
-    ffull->SetParameter(0, intercept_val);
-    ffull->SetParLimits(0, intercept_val - 0.2, intercept_val + 0.2);
-    ffull->SetParameter(1, 0.0000015);
-    ffull->SetParLimits(1, 0.000001, 0.01);
-    ffull->FixParameter(2, fbefore->GetParameter(0));
-    ffull->FixParameter(3, fbefore->GetParameter(1));
-    ffull->FixParameter(4, fafter->GetParameter(0));
-    ffull->FixParameter(5, fafter->GetParameter(1));
-    log_graph->Fit(ffull, "RQ", "SAME", get<0>(result) - 4, get<0>(result) + 3.);
-    ffull->SetParLimits(0, intercept_val + ffull->GetParameter(1), intercept_val + 0.2);
-    log_graph->Fit(ffull, "RQ", "SAME", get<0>(result) - 4, get<0>(result) + +3.);
-    get<0>(result) = ffull->GetParameter(0) - ffull->GetParameter(1);
-    get<1>(result) = sqrt(ffull->GetParError(0) * ffull->GetParError(0) + ffull->GetParameter(1) * ffull->GetParameter(1));
-    if (graphics)
+    //  --- before fit
+    pol1_before->SetParameter(0, mean_baseline);
+    pol1_before->SetParameter(1, 0.);
+    log_graph->Fit(pol1_before, "RQ", "", vbd_guess - min_before_fit, vbd_guess - max_before_fit);
+    //  --- after fit
+    pol1_after->SetParameter(0, -100);
+    pol1_after->SetParameter(1, 4);
+    log_graph->Fit(pol1_after, "RQ", "", vbd_guess + min_after_fit, vbd_guess + max_after_fit);
+
+    //  Intercept of the two lines
+    auto intercept = get_intercept(pol1_before, pol1_after);
+    result[0] = intercept[0][0];
+    result[1] = intercept[0][1];
+
+    TF1 *ffull;
+    //  Mediate with erf if requested
+    if (erf_mediate)
     {
-        TCanvas *c1 = new TCanvas(gTarget->GetName(), "c1", 600, 500);
-        log_graph->Draw("ALP");
-        log_graph->GetXaxis()->SetRangeUser(get<0>(result) - 6, get<0>(result) + 3);
-        auto max = ffull->Eval(get<0>(result) + 2);
-        max = max > 0 ? max * 1.1 : max * 0.9;
-        log_graph->SetMaximum(max);
-        fbefore->SetRange(get<0>(result) - 5, get<0>(result) + 5);
-        fbefore->SetLineColor(kBlue);
-        fbefore->DrawCopy("SAME");
-        fafter->SetRange(get<0>(result) - 5, get<0>(result) + 5);
-        fafter->SetLineColor(kGreen);
-        fafter->DrawCopy("SAME");
-        ffull->SetRange(get<0>(result) - 5, get<0>(result) + 5);
-        ffull->DrawCopy("SAME");
-        TLatex *l1 = new TLatex();
-        l1->DrawLatexNDC(0.2, 0.85, Form("V_{bd} guess = %.2f ", vbd_guess));
-        l1->DrawLatexNDC(0.2, 0.80, Form("V_{bd} = %.2f #pm %.2f", get<0>(result), get<1>(result)));
-        l1->DrawLatexNDC(0.2, 0.75, Form("V_{bd} (int.) = %.2f #pm %.2f", intercept_val, intercept_err));
-        //
-        TString basedir = get_environment_variable("SIPM4EIC_WORKDIR");
-        basedir += TString("/plots/vbdcheck/");
-        gROOT->ProcessLine(Form(".! mkdir -p %s", basedir.Data()));
-        c1->SaveAs(basedir + gTarget->GetName() + TString(".pdf"));
-        delete c1;
+        ffull = new TF1("ffull", "((0.5-0.5*TMath::Erf(((x-[0])/[1])))*([2]+x*[3])+(0.5+0.5*TMath::Erf(((x-[0])/[1])))*([4]+x*[5]))");
+        ffull->SetParameter(0, intercept[0][0]);
+        ffull->SetParLimits(0, intercept[0][0] - max_before_fit, intercept[0][0] + min_after_fit);
+        ffull->SetParameter(1, 0.0000015);
+        ffull->SetParLimits(1, 0.000001, 0.01);
+        ffull->FixParameter(2, pol1_before->GetParameter(0));
+        ffull->FixParameter(3, pol1_before->GetParameter(1));
+        ffull->FixParameter(4, pol1_after->GetParameter(0));
+        ffull->FixParameter(5, pol1_after->GetParameter(1));
+        log_graph->Fit(ffull, "RQ", "SAME", result[0] - 4, result[0] + 3.);
+        ffull->SetParLimits(0, intercept[0][0] + ffull->GetParameter(1), intercept[0][0] + 0.2);
+        log_graph->Fit(ffull, "RQ", "SAME", result[0] - 4, result[0] + +3.);
+        result[0] = ffull->GetParameter(0) - ffull->GetParameter(1);
+        result[1] = sqrt(ffull->GetParError(0) * ffull->GetParError(0) + ffull->GetParameter(1) * ffull->GetParameter(1));
     }
-    delete log_graph;
-    return result;
-}
-//
-std::pair<float, float>
-measure_breakdown_1(TGraphErrors *gTarget, float vbd_guess, bool graphics = true)
-{
-    std::pair<float, float> result = {-1, -1};
-    auto log_graph = graphutils::log(gTarget);
-    auto deriv_graph = graphutils::derivate(log_graph);
-    auto baseline_reference = 0.;
-    for (auto iPnt = 0; iPnt < 5; iPnt++)
-        baseline_reference += deriv_graph->GetY()[iPnt] / 5.;
-    auto vbd_reference = 0.;
-    auto peak_reference = 0.;
-    for (auto iPnt = 5; iPnt < 25; iPnt++)
+
+    if (!image_folder.empty())
     {
-        if (peak_reference < deriv_graph->GetY()[iPnt])
+        //  Create Canvas with result
+        TCanvas *c1 = new TCanvas("c1", "c1", 600, 500);
+        gPad->SetMargin(0.15, 0.05, 0.10, 0.05);
+
+        //  Set-up graph graphics
+        log_graph->GetXaxis()->SetTitle("bias voltage (V)");
+        log_graph->GetYaxis()->SetTitle("log of current");
+        log_graph->SetMarkerStyle(20);
+        log_graph->SetMarkerColor(kAzure - 3);
+        log_graph->GetXaxis()->SetRangeUser(result[0] - 6, result[0] + 3);
+        log_graph->GetYaxis()->SetRangeUser(pol1_before->Eval(result[0] - 6) - 1, pol1_after->Eval(result[0] + 3) + 1);
+        log_graph->Draw("ALPE");
+
+        //  Plot all fits
+        pol1_before->SetRange(result[0] - 5, result[0] + 5);
+        pol1_before->SetLineColor(kBlue);
+        pol1_before->DrawCopy("SAME");
+        pol1_after->SetRange(result[0] - 5, result[0] + 5);
+        pol1_after->SetLineColor(kGreen);
+        pol1_after->DrawCopy("SAME");
+        ffull->SetRange(result[0] - 5, result[0] + 5);
+        ffull->SetLineColor(kRed);
+        ffull->DrawCopy("SAME");
+
+        //  Write on canvas results
+        TLatex *l1 = new TLatex();
+        l1->DrawLatexNDC(0.45, 0.90, Form("V_{bd} (V)"));
+        l1->DrawLatexNDC(0.18, 0.85, Form("guess"));
+        l1->DrawLatexNDC(0.35, 0.85, Form("= %.2f ", vbd_guess));
+        l1->DrawLatexNDC(0.18, 0.80, Form("intercept"));
+        l1->DrawLatexNDC(0.35, 0.80, Form("= %.2f #pm %.2f", intercept[0][0], intercept[0][1]));
+        if (erf_mediate)
         {
-            vbd_reference = deriv_graph->GetX()[iPnt];
-            peak_reference = deriv_graph->GetY()[iPnt];
+            l1->DrawLatexNDC(0.18, 0.75, Form("fit"));
+            l1->DrawLatexNDC(0.35, 0.75, Form("= %.2f #pm %.2f", result[0], result[1]));
         }
+        //
+        gROOT->ProcessLine(Form(".! mkdir -p %s", image_folder.c_str()));
+        c1->SaveAs((image_folder + "/measure_breakdown_0.pdf").c_str());
+        delete c1;
     }
-    // TF1 *fpeak = new TF1("fpeak", "(([0]*[1])/(2))*TMath::Exp(([1]/2)*(2*[2]+[1]*[3]*[3]-2*x))*(1-TMath::Erf(([2]+[1]*[3]*[3]-x)/(TMath::Sqrt(2)*[3])))");
-    TF1 *fpeak = new TF1("fpeak", "[0]*TMath::Landau(x,[1],[2],1)");
+
+    delete log_graph;
+    return result;
+}
+
+std::array<float, 2> breakdown_voltage::measure_breakdown_1(TGraphErrors *gTarget, std::string image_folder, float threshold_guess)
+{
+    //  Method 1:
+    //  TODO: write what it does
+
+    //  Create result container
+    std::array<float, 2> result = {-1, -1};
+
+    //  Make the log-derivative graph
+    auto log_graph = graphutils::log(gTarget);
+    auto ldv_graph = graphutils::derivate(log_graph);
+
+    //  Calculate a guess for the Vbd and have the measured baseline value
+    auto guess_result = breakdown_voltage::find_vbd_guess(log_graph, threshold_guess);
+    auto vbd_guess = guess_result[0];
+    auto mean_baseline = guess_result[1];
+
     TF1 *ffull = new TF1("ffull", "[0]*TMath::Landau(x,[1],[2],0)*TMath::Gaus(x,[1],[3])");
-    fpeak->SetParameter(0, 1.);
-    fpeak->SetParameter(1, vbd_reference);
-    fpeak->SetParameter(2, .1);
-    deriv_graph->Fit(fpeak, "Q", "SAME", vbd_reference - 1.5, vbd_reference + 1.5);
-    deriv_graph->Fit(fpeak, "Q", "SAME", vbd_reference - 1.5, vbd_reference + 1.5);
-    deriv_graph->Fit(fpeak, "Q", "SAME", vbd_reference - 1.5, vbd_reference + 1.5);
-    get<0>(result) = fpeak->GetParameter(1);
-    get<1>(result) = fpeak->GetParError(1);
+    ffull->SetParameter(0, 0.5);
+    ffull->SetParameter(1, vbd_guess);
+    ffull->SetParameter(2, 1);
+    ffull->SetParameter(3, 0.5);
+    ldv_graph->Fit(ffull, "Q", "SAME", vbd_guess - 2, vbd_guess + 2);
+    result[0] = ffull->GetParameter(1);
+    result[1] = ffull->GetParError(1);
+
+    if (!image_folder.empty())
+    {
+        //  Create Canvas with result
+        TCanvas *c1 = new TCanvas("c1", "c1", 600, 500);
+        gPad->SetMargin(0.15, 0.05, 0.10, 0.05);
+
+        //  Set-up graph graphics
+        ldv_graph->GetXaxis()->SetTitle("bias voltage (V)");
+        ldv_graph->GetYaxis()->SetTitle("log of current");
+        ldv_graph->SetMarkerStyle(20);
+        ldv_graph->SetMarkerColor(kAzure - 3);
+        ldv_graph->GetXaxis()->SetRangeUser(result[0] - 6, result[0] + 3);
+        ldv_graph->GetYaxis()->SetRangeUser(ffull->Eval(result[0] - 6) - 1, ffull->Eval(result[0]) + 1);
+        ldv_graph->Draw("ALPE");
+
+        //  Plot all fits
+        ffull->SetRange(result[0] - 5, result[0] + 5);
+        ffull->SetLineColor(kRed);
+        ffull->DrawCopy("SAME");
+
+        //  Write on canvas results
+        TLatex *l1 = new TLatex();
+        l1->DrawLatexNDC(0.45, 0.90, Form("V_{bd} (V)"));
+        l1->DrawLatexNDC(0.18, 0.85, Form("guess"));
+        l1->DrawLatexNDC(0.35, 0.85, Form("= %.2f ", vbd_guess));
+        l1->DrawLatexNDC(0.18, 0.80, Form("fit"));
+        l1->DrawLatexNDC(0.35, 0.80, Form("= %.2f #pm %.2f", result[0], result[1]));
+        //
+        gROOT->ProcessLine(Form(".! mkdir -p %s", image_folder.c_str()));
+        c1->SaveAs((image_folder + "/measure_breakdown_1.pdf").c_str());
+        delete c1;
+    }
+    delete log_graph;
+    delete ldv_graph;
+    return result;
+}
+
+std::array<float, 2> breakdown_voltage::measure_breakdown_2(TGraphErrors *gTarget, std::string image_folder, float threshold_guess)
+{
+    //  Method 2:
+    //  TODO: write what it does
+
+    //  Create result container
+    std::array<float, 2> result = {-1, -1};
+
+    //  Make the log-derivative graph
+    auto log_graph = graphutils::log(gTarget);
+    auto ldv_graph = graphutils::derivate(log_graph);
+    auto ild_graph = graphutils::power(ldv_graph, -1);
+
+    //  Calculate a guess for the Vbd and have the measured baseline value
+    auto guess_result = breakdown_voltage::find_vbd_guess(log_graph, threshold_guess);
+    auto vbd_guess = guess_result[0];
+    auto mean_baseline = guess_result[1];
+
+    //  Fit the graph
+    TF1 *pol1_after = new TF1("pol1_after", "[0]+x*[1]");
+    ild_graph->Fit(pol1_after, "Q", "SAME", vbd_guess + 0.5, vbd_guess + 3.5);
+
+    //  Get intercept
+    auto intercept = get_intercept_x(pol1_after);
+    result[0] = intercept[0][0];
+    result[1] = intercept[0][1];
+
+    if (!image_folder.empty())
+    {
+        //  Create Canvas with result
+        TCanvas *c1 = new TCanvas("c1", "c1", 600, 500);
+        gPad->SetMargin(0.15, 0.05, 0.10, 0.05);
+
+        //  Set-up graph graphics
+        ild_graph->GetXaxis()->SetTitle("bias voltage (V)");
+        ild_graph->GetYaxis()->SetTitle("inverse log of current");
+        ild_graph->SetMarkerStyle(20);
+        ild_graph->SetMarkerColor(kAzure - 3);
+        ild_graph->GetXaxis()->SetRangeUser(result[0] - 3, result[0] + 6);
+        ild_graph->GetYaxis()->SetRangeUser(pol1_after->Eval(result[0] - 1), pol1_after->Eval(result[0] + 4) + 1);
+        ild_graph->Draw("ALPE");
+
+        //  Plot all fits
+        pol1_after->SetRange(result[0] - 5, result[0] + 5);
+        pol1_after->SetLineColor(kRed);
+        pol1_after->DrawCopy("SAME");
+
+        //  Write on canvas results
+        TLatex *l1 = new TLatex();
+        l1->DrawLatexNDC(0.45, 0.90, Form("V_{bd} (V)"));
+        l1->DrawLatexNDC(0.18, 0.85, Form("guess"));
+        l1->DrawLatexNDC(0.35, 0.85, Form("= %.2f ", vbd_guess));
+        l1->DrawLatexNDC(0.18, 0.80, Form("fit"));
+        l1->DrawLatexNDC(0.35, 0.80, Form("= %.2f #pm %.2f", result[0], result[1]));
+        //
+        gROOT->ProcessLine(Form(".! mkdir -p %s", image_folder.c_str()));
+        c1->SaveAs((image_folder + "/measure_breakdown_2.pdf").c_str());
+        delete c1;
+    }
+
+    delete log_graph;
+    delete ldv_graph;
+    delete ild_graph;
+    return result;
+}
+
+std::array<float, 2> breakdown_voltage::measure_breakdown_3(TGraphErrors *gTarget, std::string image_folder, float threshold_guess)
+{
+    //  Method 3:
+    //  TODO: write what it does
+
+    //  Create result container
+    std::array<float, 2> result = {-1, -1};
+
+    //  Make the log-derivative graph
+    auto log_graph = graphutils::log(gTarget);
+    auto ldv_graph = graphutils::derivate(log_graph);
+    auto ld2_graph = graphutils::derivate(ldv_graph);
+
+    //  Calculate a guess for the Vbd and have the measured baseline value
+    auto guess_result = breakdown_voltage::find_vbd_guess(log_graph, threshold_guess);
+    auto vbd_guess = guess_result[0];
+    auto mean_baseline = guess_result[1];
+
+    //  Fit the graph
+    TF1 *gaus_peak = new TF1("gaus_peak", "gaus(0)");
+    ld2_graph->Fit(gaus_peak, "Q", "SAME", vbd_guess - 3.5, vbd_guess + 3.5);
+    result[0] = gaus_peak->GetParameter(1);
+    result[1] = gaus_peak->GetParError(1);
+
+    if (!image_folder.empty())
+    {
+        //  Create Canvas with result
+        TCanvas *c1 = new TCanvas("c1", "c1", 600, 500);
+        gPad->SetMargin(0.15, 0.05, 0.10, 0.05);
+
+        //  Set-up graph graphics
+        ld2_graph->GetXaxis()->SetTitle("bias voltage (V)");
+        ld2_graph->GetYaxis()->SetTitle("double derivative of log of current");
+        ld2_graph->SetMarkerStyle(20);
+        ld2_graph->SetMarkerColor(kAzure - 3);
+        ld2_graph->GetXaxis()->SetRangeUser(result[0] - 4, result[0] + 4);
+        ld2_graph->GetYaxis()->SetRangeUser(gaus_peak->Eval(result[0] + 4) - 1, gaus_peak->Eval(result[0]) + 1);
+        ld2_graph->Draw("ALPE");
+
+        //  Plot all fits
+        gaus_peak->SetRange(result[0] - 4, result[0] + 4);
+        gaus_peak->SetLineColor(kRed);
+        gaus_peak->DrawCopy("SAME");
+
+        //  Write on canvas results
+        TLatex *l1 = new TLatex();
+        l1->DrawLatexNDC(0.45, 0.90, Form("V_{bd} (V)"));
+        l1->DrawLatexNDC(0.18, 0.85, Form("guess"));
+        l1->DrawLatexNDC(0.35, 0.85, Form("= %.2f ", vbd_guess));
+        l1->DrawLatexNDC(0.18, 0.80, Form("fit"));
+        l1->DrawLatexNDC(0.35, 0.80, Form("= %.2f #pm %.2f", result[0], result[1]));
+        //
+        gROOT->ProcessLine(Form(".! mkdir -p %s", image_folder.c_str()));
+        c1->SaveAs((image_folder + "/measure_breakdown_3.pdf").c_str());
+        delete c1;
+    }
+
+    delete log_graph;
+    delete ldv_graph;
+    delete ld2_graph;
+    return result;
+}
+
+std::array<float, 2> breakdown_voltage::measure_breakdown_4(TGraphErrors *gTarget, std::string image_folder, float threshold_guess)
+{
+    //  Method 4:
+    //  TODO: write what it does
+
+    //  Create result container
+    std::array<float, 2> result = {-1, -1};
+
+    /*
+        //  Make the log graph
+        auto log_graph = graphutils::log(gTarget);
+
+        //  Calculate a guess for the Vbd and have the measured baseline value
+        auto guess_result = breakdown_voltage::find_vbd_guess(log_graph, threshold_guess);
+        auto vbd_guess = guess_result[0];
+        auto mean_baseline = guess_result[1];
+
+        std::array<float, 2> result = {-1, -1};
+        auto log_graph = graphutils::log(gTarget);
+        //  Calculate a guess for the Vbd and have the measured baseline value
+        auto vbd_guess_baseline = find_vbd_guess(log_graph);
+        vbd_guess = get<0>(vbd_guess_baseline);
+        auto mean_baseline = get<1>(vbd_guess_baseline);
+        TF1 *pol1_before = new TF1("pol1_before", "[0]+x*[1]");
+        TF1 *pol1_after = new TF1("pol1_after", "[0]+x*[1]+x*x*[2]");
+        pol1_before->SetParameter(0, mean_baseline);
+        pol1_before->SetParameter(1, 0.);
+        pol1_after->SetParameter(0, 0.);
+        pol1_after->SetParameter(1, 4);
+        pol1_after->SetParLimits(2, -1.e3, 0.);
+        pol1_after->SetParameter(2, -0.03);
+        log_graph->Fit(pol1_before, "Q", "", vbd_guess - 5, vbd_guess - 0.3);
+        log_graph->Fit(pol1_after, "Q", "", vbd_guess + 0.3, vbd_guess + 2.3);
+        auto intercept_before = pol1_before->GetParameter(0);
+        auto angularc_before = pol1_before->GetParameter(1);
+        auto c0_after = pol1_after->GetParameter(0);
+        auto c1_after = pol1_after->GetParameter(1);
+        auto c2_after = pol1_after->GetParameter(2);
+        auto delta = sqrt((c1_after - angularc_before) * (c1_after - angularc_before) - 4 * c2_after * (c0_after - intercept_before));
+        auto intercept_before_econtrib = pol1_before->GetParError(0) / (delta);
+        auto angularc_before_econtrib = pol1_before->GetParError(1) * ((c1_after - angularc_before) / (delta) + 1) / (2 * c2_after);
+        auto c0_after_econtrib = pol1_after->GetParError(0) / (delta);
+        auto c1_after_econtrib = -pol1_after->GetParError(1) * ((c1_after - angularc_before) / (delta) + 1) / (2 * c2_after);
+        auto c2_after_econtrib = pol1_after->GetParError(2) * ((c0_after - intercept_before) / (c2_after * delta) - (-delta - c1_after + angularc_before) / (2 * c2_after * c2_after));
+        auto intercept_val = result[0] = (-(c1_after - angularc_before) + delta) / (2 * c2_after);
+        auto intercept_err = result[1] = sqrt(intercept_before_econtrib * intercept_before_econtrib + angularc_before_econtrib * angularc_before_econtrib + c0_after_econtrib * c0_after_econtrib + c1_after_econtrib * c1_after_econtrib + c2_after_econtrib * c2_after_econtrib);
+        TF1 *ffull = new TF1("ffull", "(0.5-0.5*TMath::Erf(((x-[0])/[1])))*([2]+x*[3])+(0.5+0.5*TMath::Erf(((x-[0])/[1])))*([4]+x*[5]+x*x*[6])");
+        ffull->SetParameter(0, result[0] + 0.2);
+        ffull->SetParLimits(0, intercept_val - 0.3, intercept_val + 5.);
+        ffull->SetParameter(1, 0.2);
+        ffull->SetParLimits(1, 0.0001, 0.3);
+        ffull->FixParameter(2, pol1_before->GetParameter(0));
+        ffull->FixParameter(3, pol1_before->GetParameter(1));
+        ffull->FixParameter(4, pol1_after->GetParameter(0));
+        ffull->FixParameter(5, pol1_after->GetParameter(1));
+        ffull->FixParameter(6, pol1_after->GetParameter(2));
+        log_graph->Fit(ffull, "Q", "SAME", result[0] - 4, result[0] + 4.);
+        // ffull->SetParLimits(0, intercept_val + ffull->GetParameter(1), intercept_val + 5.);
+        // log_graph->Fit(ffull, "RQ", "SAME", result[0] - 4, result[0] + 3);
+        result[0] = ffull->GetParameter(0) - ffull->GetParameter(1);
+        result[1] = sqrt(ffull->GetParError(0) * ffull->GetParError(0) + ffull->GetParameter(1) * ffull->GetParameter(1));
+        if (graphics)
+        {
+            TCanvas *c1 = new TCanvas(gTarget->GetName(), "c1", 600, 500);
+            log_graph->Draw("ALP");
+            log_graph->GetXaxis()->SetRangeUser(result[0] - 6, result[0] + 3);
+            auto max = ffull->Eval(result[0] + 2);
+            max = max > 0 ? max * 1.1 : max * 0.9;
+            log_graph->SetMaximum(max);
+            pol1_before->SetRange(result[0] - 5, result[0] + 5);
+            pol1_before->SetLineColor(kBlue);
+            pol1_before->DrawCopy("SAME");
+            pol1_after->SetRange(result[0] - 5, result[0] + 5);
+            pol1_after->SetLineColor(kGreen);
+            pol1_after->DrawCopy("SAME");
+            ffull->SetRange(result[0] - 5, result[0] + 5);
+            ffull->DrawCopy("SAME");
+            TLatex *l1 = new TLatex();
+            l1->DrawLatexNDC(0.2, 0.85, Form("V_{bd} = %.2f #pm %.2f", result[0], result[1]));
+            l1->DrawLatexNDC(0.2, 0.80, Form("V_{bd} (int.) = %.2f #pm %.2f", intercept_val, intercept_err));
+            //
+            TString basedir = get_environment_variable("SIPM4EIC_WORKDIR");
+            basedir += TString("/plots/vbdcheck/");
+            gROOT->ProcessLine(Form(".! mkdir -p %s", basedir.Data()));
+            c1->SaveAs(basedir + gTarget->GetName() + TString(".pdf"));
+            delete c1;
+        }
+        delete log_graph;
+        */
+    return result;
+}
+
+std::array<float, 2> measure_breakdown_5(TGraphErrors *gTarget, std::string image_folder, float threshold_guess)
+{
+    //  Method 5:
+    //  TODO: write what it does
+
+    //  Create result container
+    std::array<float, 2> result = {-1, -1};
+
+    /*
+
+    //  Make the log-derivative graph
+    auto log_graph = graphutils::log(gTarget);
+    auto ldv_graph = graphutils::derivate(log_graph);
+    auto ld2_graph = graphutils::derivate(ldv_graph);
+
+    //  Calculate a guess for the Vbd and have the measured baseline value
+    auto guess_result = breakdown_voltage::find_vbd_guess(log_graph, threshold_guess);
+    auto vbd_guess = guess_result[0];
+    auto mean_baseline = guess_result[1];
+
+    //  Fit the graph
+    TF1 *gaus_peak = new TF1("gaus_peak", "gaus(0)");
+    ld2_graph->Fit(gaus_peak, "Q", "SAME", vbd_guess - 3.5, vbd_guess + 3.5);
+    result[0] = gaus_peak->GetParameter(1);
+    result[1] = gaus_peak->GetParError(1);
+
+    if (!image_folder.empty())
+    {
+        //  Create Canvas with result
+        TCanvas *c1 = new TCanvas("c1", "c1", 600, 500);
+        gPad->SetMargin(0.15, 0.05, 0.10, 0.05);
+
+        //  Set-up graph graphics
+        ld2_graph->GetXaxis()->SetTitle("bias voltage (V)");
+        ld2_graph->GetYaxis()->SetTitle("double derivative of log of current");
+        ld2_graph->SetMarkerStyle(20);
+        ld2_graph->SetMarkerColor(kAzure - 3);
+        ld2_graph->GetXaxis()->SetRangeUser(result[0] - 4, result[0] + 4);
+        ld2_graph->GetYaxis()->SetRangeUser(gaus_peak->Eval(result[0] + 4) - 1, gaus_peak->Eval(result[0]) + 1);
+        ld2_graph->Draw("ALPE");
+
+        //  Plot all fits
+        gaus_peak->SetRange(result[0] - 4, result[0] + 4);
+        gaus_peak->SetLineColor(kRed);
+        gaus_peak->DrawCopy("SAME");
+
+        //  Write on canvas results
+        TLatex *l1 = new TLatex();
+        l1->DrawLatexNDC(0.45, 0.90, Form("V_{bd} (V)"));
+        l1->DrawLatexNDC(0.18, 0.85, Form("guess"));
+        l1->DrawLatexNDC(0.35, 0.85, Form("= %.2f ", vbd_guess));
+        l1->DrawLatexNDC(0.18, 0.80, Form("fit"));
+        l1->DrawLatexNDC(0.35, 0.80, Form("= %.2f #pm %.2f", result[0], result[1]));
+        //
+        gROOT->ProcessLine(Form(".! mkdir -p %s", image_folder.c_str()));
+        c1->SaveAs((image_folder + "/measure_breakdown_3.pdf").c_str());
+        delete c1;
+    }
+
+    delete log_graph;
+    delete ldv_graph;
+    delete ld2_graph;
+    return result;
+
+    std::array<float, 2> result = {-1, -1};
+    auto log_graph = graphutils::log(gTarget);
+    TF1 *pol1_before = new TF1("pol1_before", "[0]+x*[1]");
+    TF1 *pol1_after = new TF1("pol1_after", "[0]*(x-[1])^([2])");
+    pol1_after->SetParameter(1, vbd_guess);
+    log_graph->Fit(pol1_before, "MERQ", "", vbd_guess - 5, vbd_guess - 0.2);
+    log_graph->Fit(pol1_after, "MERQ", "", vbd_guess + 0.2, vbd_guess + 5);
+    TF1 *ffull = new TF1("ffull", "([1]+x*[2])+(x>[0])*(+[3]*(x-[4])^([5]))");
+    ffull->SetParameter(0, vbd_guess);
+    ffull->FixParameter(1, pol1_before->GetParameter(0));
+    ffull->FixParameter(2, pol1_before->GetParameter(1));
+    ffull->FixParameter(3, pol1_after->GetParameter(0));
+    ffull->FixParameter(4, pol1_after->GetParameter(1));
+    ffull->FixParameter(5, pol1_after->GetParameter(2));
+    log_graph->Fit(ffull, "MERQ", "SAME", vbd_guess - 3, vbd_guess + 3);
+    result[0] = 48; // ffull->GetParameter(0) - ffull->GetParameter(1);
+    result[1] = sqrt(ffull->GetParError(0) * ffull->GetParError(0) + ffull->GetParameter(1) * ffull->GetParameter(1));
     if (graphics)
     {
-        TCanvas *c1 = new TCanvas(gTarget->GetName(), "c1", 600, 500);
-        deriv_graph->Draw("ALP");
-        deriv_graph->GetXaxis()->SetRangeUser(get<0>(result) - 6, get<0>(result) + 3);
-        fpeak->SetRange(get<0>(result) - 6, get<0>(result) + 3);
-        fpeak->SetLineColor(kBlue);
-        fpeak->SetLineStyle(kDashed);
-        fpeak->DrawCopy("SAME");
-        ffull->SetRange(get<0>(result) - 6, get<0>(result) + 3);
+        TCanvas *c1 = new TCanvas();
+        log_graph->Draw("ALP");
+        log_graph->GetXaxis()->SetRangeUser(result[0] - 2, result[0] + 2);
+        pol1_before->SetRange(result[0] - 5, result[0] + 5);
+        pol1_before->SetLineColor(kBlue);
+        pol1_before->DrawCopy("SAME");
+        pol1_after->SetRange(result[0] - 5, result[0] + 5);
+        pol1_after->SetLineColor(kGreen);
+        pol1_after->DrawCopy("SAME");
+        ffull->SetRange(result[0] - 5, result[0] + 5);
         ffull->DrawCopy("SAME");
         TLatex *l1 = new TLatex();
-        l1->DrawLatexNDC(0.2, 0.85, Form("V_{bd} = %.2f #pm %.2f", get<0>(result), get<1>(result)));
-        l1->DrawLatexNDC(0.2, 0.80, Form("V_{bd} = %.2f", vbd_reference));
+        l1->DrawLatexNDC(0.2, 0.85, Form("V_{bd} = %.2f #pm %.2f", result[0], result[1]));
         //
         TString basedir = get_environment_variable("SIPM4EIC_WORKDIR");
         basedir += TString("/plots/vbdcheck/");
@@ -153,146 +532,88 @@ measure_breakdown_1(TGraphErrors *gTarget, float vbd_guess, bool graphics = true
         delete c1;
     }
     delete log_graph;
-    delete deriv_graph;
+    result[0] = ffull->GetParameter(0);
+    result[1] = sqrt(ffull->GetParError(0) * ffull->GetParError(0));
+        */
     return result;
 }
+
+/*
+
+//  List of methods to determine the breakdwon voltage in a I-V curve
+//  methods taken from https://arxiv.org/abs/1606.07805
 //
-std::pair<float, float>
-measure_breakdown_2(TGraphErrors *gTarget, float vbd_guess, bool graphics = false)
-{
-    std::pair<float, float> result = {-1, -1};
-    auto log_graph = graphutils::log(gTarget);
-    auto deriv_graph = graphutils::derivate(log_graph);
-    auto inverse_graph = graphutils::power(deriv_graph, -1);
-    for (auto iPnt = 3; iPnt < inverse_graph->GetN() - 3; iPnt++)
-    {
-        auto current_x = inverse_graph->GetX()[iPnt];
-        auto current_y = inverse_graph->GetY()[iPnt];
-        auto prev1_y = inverse_graph->GetY()[iPnt - 1];
-        auto prev2_y = inverse_graph->GetY()[iPnt - 2];
-        auto prev3_y = inverse_graph->GetY()[iPnt - 2];
-        auto next1_y = inverse_graph->GetY()[iPnt + 1];
-        auto next2_y = inverse_graph->GetY()[iPnt + 2];
-        auto next3_y = inverse_graph->GetY()[iPnt + 2];
-        if (!((current_y < prev1_y) && (prev1_y < prev2_y) && (prev2_y <= prev3_y)))
-            continue;
-        if (!((current_y < next1_y) && (next1_y < next2_y) && (next2_y <= next3_y)))
-            continue;
-        vbd_guess = current_x;
-        break;
-    }
-    TF1 *fafter = new TF1("fafter", "[0]+x*[1]");
-    inverse_graph->Fit(fafter, "Q", "SAME", vbd_guess, vbd_guess + 2);
-    auto qcoeff = fafter->GetParameter(0);
-    auto mcoeff = fafter->GetParameter(1);
-    auto qcoefe = fafter->GetParError(0);
-    auto mcoefe = fafter->GetParError(1);
-    get<0>(result) = -(qcoeff) / (mcoeff);
-    get<1>(result) = -(qcoeff) / (mcoeff)*sqrt(((qcoefe / qcoeff) * (qcoefe / qcoeff)) + ((mcoefe / mcoeff) * (mcoefe / mcoeff)));
-    if (graphics)
-    {
-        TCanvas *c1 = new TCanvas(gTarget->GetName(), "c1", 600, 500);
-        inverse_graph->Draw("ALP");
-        inverse_graph->GetXaxis()->SetRangeUser(get<0>(result) - 6, get<0>(result) + 3);
-        fafter->SetRange(get<0>(result) - 6, get<0>(result) + 3);
-        fafter->DrawCopy("SAME");
-        TLatex *l1 = new TLatex();
-        l1->DrawLatexNDC(0.2, 0.85, Form("V_{bd} = %.2f #pm %.2f", get<0>(result), get<1>(result)));
-        //
-        TString basedir = get_environment_variable("SIPM4EIC_WORKDIR");
-        basedir += TString("/plots/vbdcheck/");
-        gROOT->ProcessLine(Form(".! mkdir -p %s", basedir.Data()));
-        c1->SaveAs(basedir + gTarget->GetName() + TString(".pdf"));
-        delete c1;
-    }
-    delete log_graph;
-    delete deriv_graph;
-    delete inverse_graph;
-    return result;
-}
+//  !TODO: Clean-up graph utils and make new general util repository
 //
-std::pair<float, float>
-measure_breakdown_3(TGraphErrors *gTarget, float vbd_guess, bool graphics = false)
-{
-    std::pair<float, float> result = {-1, -1};
-    auto log_graph = graphutils::log(gTarget);
-    auto deriv_graph = graphutils::derivate(log_graph);
-    auto deriv2_graph = graphutils::derivate(deriv_graph);
-    TF1 *fpeak = new TF1("fpeak", "gaus(0)");
-    deriv2_graph->Fit(fpeak, "Q", "SAME", vbd_guess - 0.7, vbd_guess + 0.7);
-    get<0>(result) = fpeak->GetParameter(1);
-    get<1>(result) = fpeak->GetParError(1);
-    delete log_graph;
-    delete deriv_graph;
-    // delete deriv2_graph;
-    return result;
-}
+typedef std::map<std::string, std::map<std::string, std::map<std::string, std::array<double, 2>>>> breakdown_voltages_type;
+typedef std::map<std::string, std::map<std::string, std::map<std::string, std::map<std::string, std::array<double, 2>>>>> breakdown_voltages_sensors_type;
 //
-std::pair<float, float>
+//
+std::array<float, 2>
 measure_breakdown_4(TGraphErrors *gTarget, float vbd_guess, bool graphics = false)
 {
-    std::pair<float, float> result = {-1, -1};
+    std::array<float, 2> result = {-1, -1};
     auto log_graph = graphutils::log(gTarget);
     //  Calculate a guess for the Vbd and have the measured baseline value
     auto vbd_guess_baseline = find_vbd_guess(log_graph);
     vbd_guess = get<0>(vbd_guess_baseline);
     auto mean_baseline = get<1>(vbd_guess_baseline);
-    TF1 *fbefore = new TF1("fbefore", "[0]+x*[1]");
-    TF1 *fafter = new TF1("fafter", "[0]+x*[1]+x*x*[2]");
-    fbefore->SetParameter(0, mean_baseline);
-    fbefore->SetParameter(1, 0.);
-    fafter->SetParameter(0, 0.);
-    fafter->SetParameter(1, 4);
-    fafter->SetParLimits(2, -1.e3, 0.);
-    fafter->SetParameter(2, -0.03);
-    log_graph->Fit(fbefore, "Q", "", vbd_guess - 5, vbd_guess - 0.3);
-    log_graph->Fit(fafter, "Q", "", vbd_guess + 0.3, vbd_guess + 2.3);
-    auto intercept_before = fbefore->GetParameter(0);
-    auto angularc_before = fbefore->GetParameter(1);
-    auto c0_after = fafter->GetParameter(0);
-    auto c1_after = fafter->GetParameter(1);
-    auto c2_after = fafter->GetParameter(2);
+    TF1 *pol1_before = new TF1("pol1_before", "[0]+x*[1]");
+    TF1 *pol1_after = new TF1("pol1_after", "[0]+x*[1]+x*x*[2]");
+    pol1_before->SetParameter(0, mean_baseline);
+    pol1_before->SetParameter(1, 0.);
+    pol1_after->SetParameter(0, 0.);
+    pol1_after->SetParameter(1, 4);
+    pol1_after->SetParLimits(2, -1.e3, 0.);
+    pol1_after->SetParameter(2, -0.03);
+    log_graph->Fit(pol1_before, "Q", "", vbd_guess - 5, vbd_guess - 0.3);
+    log_graph->Fit(pol1_after, "Q", "", vbd_guess + 0.3, vbd_guess + 2.3);
+    auto intercept_before = pol1_before->GetParameter(0);
+    auto angularc_before = pol1_before->GetParameter(1);
+    auto c0_after = pol1_after->GetParameter(0);
+    auto c1_after = pol1_after->GetParameter(1);
+    auto c2_after = pol1_after->GetParameter(2);
     auto delta = sqrt((c1_after - angularc_before) * (c1_after - angularc_before) - 4 * c2_after * (c0_after - intercept_before));
-    auto intercept_before_econtrib = fbefore->GetParError(0) / (delta);
-    auto angularc_before_econtrib = fbefore->GetParError(1) * ((c1_after - angularc_before) / (delta) + 1) / (2 * c2_after);
-    auto c0_after_econtrib = fafter->GetParError(0) / (delta);
-    auto c1_after_econtrib = -fafter->GetParError(1) * ((c1_after - angularc_before) / (delta) + 1) / (2 * c2_after);
-    auto c2_after_econtrib = fafter->GetParError(2) * ((c0_after - intercept_before) / (c2_after * delta) - (-delta - c1_after + angularc_before) / (2 * c2_after * c2_after));
-    auto intercept_val = get<0>(result) = (-(c1_after - angularc_before) + delta) / (2 * c2_after);
-    auto intercept_err = get<1>(result) = sqrt(intercept_before_econtrib * intercept_before_econtrib + angularc_before_econtrib * angularc_before_econtrib + c0_after_econtrib * c0_after_econtrib + c1_after_econtrib * c1_after_econtrib + c2_after_econtrib * c2_after_econtrib);
+    auto intercept_before_econtrib = pol1_before->GetParError(0) / (delta);
+    auto angularc_before_econtrib = pol1_before->GetParError(1) * ((c1_after - angularc_before) / (delta) + 1) / (2 * c2_after);
+    auto c0_after_econtrib = pol1_after->GetParError(0) / (delta);
+    auto c1_after_econtrib = -pol1_after->GetParError(1) * ((c1_after - angularc_before) / (delta) + 1) / (2 * c2_after);
+    auto c2_after_econtrib = pol1_after->GetParError(2) * ((c0_after - intercept_before) / (c2_after * delta) - (-delta - c1_after + angularc_before) / (2 * c2_after * c2_after));
+    auto intercept_val = result[0] = (-(c1_after - angularc_before) + delta) / (2 * c2_after);
+    auto intercept_err = result[1] = sqrt(intercept_before_econtrib * intercept_before_econtrib + angularc_before_econtrib * angularc_before_econtrib + c0_after_econtrib * c0_after_econtrib + c1_after_econtrib * c1_after_econtrib + c2_after_econtrib * c2_after_econtrib);
     TF1 *ffull = new TF1("ffull", "(0.5-0.5*TMath::Erf(((x-[0])/[1])))*([2]+x*[3])+(0.5+0.5*TMath::Erf(((x-[0])/[1])))*([4]+x*[5]+x*x*[6])");
-    ffull->SetParameter(0, get<0>(result) + 0.2);
+    ffull->SetParameter(0, result[0] + 0.2);
     ffull->SetParLimits(0, intercept_val - 0.3, intercept_val + 5.);
     ffull->SetParameter(1, 0.2);
     ffull->SetParLimits(1, 0.0001, 0.3);
-    ffull->FixParameter(2, fbefore->GetParameter(0));
-    ffull->FixParameter(3, fbefore->GetParameter(1));
-    ffull->FixParameter(4, fafter->GetParameter(0));
-    ffull->FixParameter(5, fafter->GetParameter(1));
-    ffull->FixParameter(6, fafter->GetParameter(2));
-    log_graph->Fit(ffull, "Q", "SAME", get<0>(result) - 4, get<0>(result) + 4.);
+    ffull->FixParameter(2, pol1_before->GetParameter(0));
+    ffull->FixParameter(3, pol1_before->GetParameter(1));
+    ffull->FixParameter(4, pol1_after->GetParameter(0));
+    ffull->FixParameter(5, pol1_after->GetParameter(1));
+    ffull->FixParameter(6, pol1_after->GetParameter(2));
+    log_graph->Fit(ffull, "Q", "SAME", result[0] - 4, result[0] + 4.);
     // ffull->SetParLimits(0, intercept_val + ffull->GetParameter(1), intercept_val + 5.);
-    // log_graph->Fit(ffull, "RQ", "SAME", get<0>(result) - 4, get<0>(result) + 3);
-    get<0>(result) = ffull->GetParameter(0) - ffull->GetParameter(1);
-    get<1>(result) = sqrt(ffull->GetParError(0) * ffull->GetParError(0) + ffull->GetParameter(1) * ffull->GetParameter(1));
+    // log_graph->Fit(ffull, "RQ", "SAME", result[0] - 4, result[0] + 3);
+    result[0] = ffull->GetParameter(0) - ffull->GetParameter(1);
+    result[1] = sqrt(ffull->GetParError(0) * ffull->GetParError(0) + ffull->GetParameter(1) * ffull->GetParameter(1));
     if (graphics)
     {
         TCanvas *c1 = new TCanvas(gTarget->GetName(), "c1", 600, 500);
         log_graph->Draw("ALP");
-        log_graph->GetXaxis()->SetRangeUser(get<0>(result) - 6, get<0>(result) + 3);
-        auto max = ffull->Eval(get<0>(result) + 2);
+        log_graph->GetXaxis()->SetRangeUser(result[0] - 6, result[0] + 3);
+        auto max = ffull->Eval(result[0] + 2);
         max = max > 0 ? max * 1.1 : max * 0.9;
         log_graph->SetMaximum(max);
-        fbefore->SetRange(get<0>(result) - 5, get<0>(result) + 5);
-        fbefore->SetLineColor(kBlue);
-        fbefore->DrawCopy("SAME");
-        fafter->SetRange(get<0>(result) - 5, get<0>(result) + 5);
-        fafter->SetLineColor(kGreen);
-        fafter->DrawCopy("SAME");
-        ffull->SetRange(get<0>(result) - 5, get<0>(result) + 5);
+        pol1_before->SetRange(result[0] - 5, result[0] + 5);
+        pol1_before->SetLineColor(kBlue);
+        pol1_before->DrawCopy("SAME");
+        pol1_after->SetRange(result[0] - 5, result[0] + 5);
+        pol1_after->SetLineColor(kGreen);
+        pol1_after->DrawCopy("SAME");
+        ffull->SetRange(result[0] - 5, result[0] + 5);
         ffull->DrawCopy("SAME");
         TLatex *l1 = new TLatex();
-        l1->DrawLatexNDC(0.2, 0.85, Form("V_{bd} = %.2f #pm %.2f", get<0>(result), get<1>(result)));
+        l1->DrawLatexNDC(0.2, 0.85, Form("V_{bd} = %.2f #pm %.2f", result[0], result[1]));
         l1->DrawLatexNDC(0.2, 0.80, Form("V_{bd} (int.) = %.2f #pm %.2f", intercept_val, intercept_err));
         //
         TString basedir = get_environment_variable("SIPM4EIC_WORKDIR");
@@ -305,104 +626,57 @@ measure_breakdown_4(TGraphErrors *gTarget, float vbd_guess, bool graphics = fals
     return result;
 }
 //
-std::pair<float, float>
-measure_breakdown_5(TGraphErrors *gTarget, float vbd_guess, bool graphics = false)
-{
-    std::pair<float, float> result = {-1, -1};
-    auto log_graph = graphutils::log(gTarget);
-    TF1 *fbefore = new TF1("fbefore", "[0]+x*[1]");
-    TF1 *fafter = new TF1("fafter", "[0]*(x-[1])^([2])");
-    fafter->SetParameter(1, vbd_guess);
-    log_graph->Fit(fbefore, "MERQ", "", vbd_guess - 5, vbd_guess - 0.2);
-    log_graph->Fit(fafter, "MERQ", "", vbd_guess + 0.2, vbd_guess + 5);
-    TF1 *ffull = new TF1("ffull", "([1]+x*[2])+(x>[0])*(+[3]*(x-[4])^([5]))");
-    ffull->SetParameter(0, vbd_guess);
-    ffull->FixParameter(1, fbefore->GetParameter(0));
-    ffull->FixParameter(2, fbefore->GetParameter(1));
-    ffull->FixParameter(3, fafter->GetParameter(0));
-    ffull->FixParameter(4, fafter->GetParameter(1));
-    ffull->FixParameter(5, fafter->GetParameter(2));
-    log_graph->Fit(ffull, "MERQ", "SAME", vbd_guess - 3, vbd_guess + 3);
-    get<0>(result) = 48; // ffull->GetParameter(0) - ffull->GetParameter(1);
-    get<1>(result) = sqrt(ffull->GetParError(0) * ffull->GetParError(0) + ffull->GetParameter(1) * ffull->GetParameter(1));
-    if (graphics)
-    {
-        TCanvas *c1 = new TCanvas();
-        log_graph->Draw("ALP");
-        log_graph->GetXaxis()->SetRangeUser(get<0>(result) - 2, get<0>(result) + 2);
-        fbefore->SetRange(get<0>(result) - 5, get<0>(result) + 5);
-        fbefore->SetLineColor(kBlue);
-        fbefore->DrawCopy("SAME");
-        fafter->SetRange(get<0>(result) - 5, get<0>(result) + 5);
-        fafter->SetLineColor(kGreen);
-        fafter->DrawCopy("SAME");
-        ffull->SetRange(get<0>(result) - 5, get<0>(result) + 5);
-        ffull->DrawCopy("SAME");
-        TLatex *l1 = new TLatex();
-        l1->DrawLatexNDC(0.2, 0.85, Form("V_{bd} = %.2f #pm %.2f", get<0>(result), get<1>(result)));
-        //
-        TString basedir = get_environment_variable("SIPM4EIC_WORKDIR");
-        basedir += TString("/plots/vbdcheck/");
-        gROOT->ProcessLine(Form(".! mkdir -p %s", basedir.Data()));
-        c1->SaveAs(basedir + gTarget->GetName() + TString(".pdf"));
-        delete c1;
-    }
-    delete log_graph;
-    get<0>(result) = ffull->GetParameter(0);
-    get<1>(result) = sqrt(ffull->GetParError(0) * ffull->GetParError(0));
-    return result;
-}
 //
-std::pair<float, float>
+std::array<float, 2>
 measure_breakdown_6(TGraphErrors *gTarget, float vbd_guess, bool graphics = false)
 {
-    std::pair<float, float> result = {-1, -1};
+    std::array<float, 2> result = {-1, -1};
     auto current_graph = (TGraphErrors *)gTarget->Clone("tmp");
     TF1 *fprebefore = new TF1("fprebefore", "[0]");
-    TF1 *fbefore = new TF1("fbefore", "[0]+x*[1]");
-    TF1 *fafter = new TF1("fafter", "(TMath::Sign([3],(x-[0])))*(TMath::Power(TMath::Abs(x-[0])/([1]),[2]))");
-    fbefore->FixParameter(0, fprebefore->GetParameter(0));
-    fafter->FixParameter(0, vbd_guess);
-    fafter->SetParLimits(1, 1.e-12, 1.e1);
-    fafter->SetParameter(1, .7);
-    fafter->SetParLimits(2, 1.e-12, 1.e1);
-    fafter->SetParameter(2, .1);
-    fafter->SetParameter(3, fprebefore->GetParameter(0));
-    fafter->FixParameter(0, vbd_guess);
-    fafter->SetParameter(1, 7.17717e-01);
-    fafter->SetParameter(2, 1.);
-    fafter->SetParameter(3, 4.59948e-09);
-    current_graph->Fit(fbefore, "MERQ", "", vbd_guess - 5, vbd_guess - 0.2);
-    current_graph->Fit(fafter, "MERQ", "", vbd_guess + 0.2, vbd_guess + 5);
+    TF1 *pol1_before = new TF1("pol1_before", "[0]+x*[1]");
+    TF1 *pol1_after = new TF1("pol1_after", "(TMath::Sign([3],(x-[0])))*(TMath::Power(TMath::Abs(x-[0])/([1]),[2]))");
+    pol1_before->FixParameter(0, fprebefore->GetParameter(0));
+    pol1_after->FixParameter(0, vbd_guess);
+    pol1_after->SetParLimits(1, 1.e-12, 1.e1);
+    pol1_after->SetParameter(1, .7);
+    pol1_after->SetParLimits(2, 1.e-12, 1.e1);
+    pol1_after->SetParameter(2, .1);
+    pol1_after->SetParameter(3, fprebefore->GetParameter(0));
+    pol1_after->FixParameter(0, vbd_guess);
+    pol1_after->SetParameter(1, 7.17717e-01);
+    pol1_after->SetParameter(2, 1.);
+    pol1_after->SetParameter(3, 4.59948e-09);
+    current_graph->Fit(pol1_before, "MERQ", "", vbd_guess - 5, vbd_guess - 0.2);
+    current_graph->Fit(pol1_after, "MERQ", "", vbd_guess + 0.2, vbd_guess + 5);
     TF1 *ffull = new TF1("ffull", "(0.5-0.5*TMath::Erf((x-[0])/[1]))*([2]+x*[3])+(0.5+0.5*TMath::Erf(((x-[0])/[1])))*([2]+x*[3]+(TMath::Sign([7],(x-[4])))*(TMath::Power(TMath::Abs(x-[4])/([5]),[6])))");
     ffull->SetParameter(0, vbd_guess);
     ffull->SetParameter(1, 0.2);
     ffull->SetParLimits(1, 0.0001, 0.3);
-    ffull->FixParameter(2, fbefore->GetParameter(0));
-    ffull->FixParameter(3, fbefore->GetParameter(1));
-    ffull->FixParameter(4, fafter->GetParameter(0));
-    ffull->FixParameter(5, fafter->GetParameter(1));
-    ffull->FixParameter(6, fafter->GetParameter(2));
-    ffull->FixParameter(7, fafter->GetParameter(3));
+    ffull->FixParameter(2, pol1_before->GetParameter(0));
+    ffull->FixParameter(3, pol1_before->GetParameter(1));
+    ffull->FixParameter(4, pol1_after->GetParameter(0));
+    ffull->FixParameter(5, pol1_after->GetParameter(1));
+    ffull->FixParameter(6, pol1_after->GetParameter(2));
+    ffull->FixParameter(7, pol1_after->GetParameter(3));
     current_graph->Fit(ffull, "MERQ", "SAME", vbd_guess - 5, vbd_guess + 5);
-    get<0>(result) = ffull->GetParameter(0) - ffull->GetParameter(1);
-    get<1>(result) = sqrt(ffull->GetParError(0) * ffull->GetParError(0) + ffull->GetParameter(1) * ffull->GetParameter(1));
+    result[0] = ffull->GetParameter(0) - ffull->GetParameter(1);
+    result[1] = sqrt(ffull->GetParError(0) * ffull->GetParError(0) + ffull->GetParameter(1) * ffull->GetParameter(1));
     if (graphics)
     {
         TCanvas *c1 = new TCanvas();
         gPad->SetLogy();
         current_graph->Draw("ALP");
-        current_graph->GetXaxis()->SetRangeUser(get<0>(result) - 5, get<0>(result) + 5);
-        fbefore->SetRange(get<0>(result) - 5, get<0>(result) + 5);
-        fbefore->SetLineColor(kBlue);
-        fbefore->DrawCopy("SAME");
-        fafter->SetRange(get<0>(result) - 5, get<0>(result) + 5);
-        fafter->SetLineColor(kGreen);
-        fafter->DrawCopy("SAME");
-        ffull->SetRange(get<0>(result) - 5, get<0>(result) + 5);
+        current_graph->GetXaxis()->SetRangeUser(result[0] - 5, result[0] + 5);
+        pol1_before->SetRange(result[0] - 5, result[0] + 5);
+        pol1_before->SetLineColor(kBlue);
+        pol1_before->DrawCopy("SAME");
+        pol1_after->SetRange(result[0] - 5, result[0] + 5);
+        pol1_after->SetLineColor(kGreen);
+        pol1_after->DrawCopy("SAME");
+        ffull->SetRange(result[0] - 5, result[0] + 5);
         ffull->DrawCopy("SAME");
         TLatex *l1 = new TLatex();
-        l1->DrawLatexNDC(0.2, 0.85, Form("V_{bd} = %.2f #pm %.2f", get<0>(result), get<1>(result)));
+        l1->DrawLatexNDC(0.2, 0.85, Form("V_{bd} = %.2f #pm %.2f", result[0], result[1]));
         //
         TString basedir = get_environment_variable("SIPM4EIC_WORKDIR");
         basedir += TString("/plots/vbdcheck/");
@@ -411,61 +685,61 @@ measure_breakdown_6(TGraphErrors *gTarget, float vbd_guess, bool graphics = fals
         delete c1;
     }
     delete current_graph;
-    get<0>(result) = ffull->GetParameter(0);
-    get<1>(result) = sqrt(ffull->GetParError(0) * ffull->GetParError(0));
+    result[0] = ffull->GetParameter(0);
+    result[1] = sqrt(ffull->GetParError(0) * ffull->GetParError(0));
     return result;
 }
 //
-std::pair<float, float>
+std::array<float, 2>
 measure_breakdown_100(TGraphErrors *gTarget, float vbd_guess, bool graphics = false)
 {
     // Generate result pair
-    std::pair<float, float> result = {-1, -1};
+    std::array<float, 2> result = {-1, -1};
     // Geenrate local copy of graph
     auto current_graph = (TGraphErrors *)gTarget->Clone();
     // Linear fit to find with extrapolation the crossing of X-axis
-    TF1 *fafter = new TF1("fafter", "(x-[0])/[1]");
+    TF1 *pol1_after = new TF1("pol1_after", "(x-[0])/[1]");
     TF1 *ffull = new TF1("ffull", "(x-[0])/[1]+[2]/(x-[3])");
     ffull->SetParLimits(2, 0., 1.e8);
     // Function prepping
     // After fitting
-    fafter->FixParameter(0, vbd_guess);
-    fafter->SetParameter(1, 1. / (current_graph->Eval(vbd_guess + 3) - current_graph->Eval(vbd_guess + 2)));
-    current_graph->Fit(fafter, "MEQ", "", vbd_guess + 2.0, vbd_guess + 2.5);
-    fafter->SetParLimits(0, vbd_guess - 3, vbd_guess + 3);
-    current_graph->Fit(fafter, "MEQ", "", vbd_guess + 2.0, vbd_guess + 2.5);
+    pol1_after->FixParameter(0, vbd_guess);
+    pol1_after->SetParameter(1, 1. / (current_graph->Eval(vbd_guess + 3) - current_graph->Eval(vbd_guess + 2)));
+    current_graph->Fit(pol1_after, "MEQ", "", vbd_guess + 2.0, vbd_guess + 2.5);
+    pol1_after->SetParLimits(0, vbd_guess - 3, vbd_guess + 3);
+    current_graph->Fit(pol1_after, "MEQ", "", vbd_guess + 2.0, vbd_guess + 2.5);
     // Full fitting
-    ffull->FixParameter(0, fafter->GetParameter(0));
-    ffull->FixParameter(1, fafter->GetParameter(1));
+    ffull->FixParameter(0, pol1_after->GetParameter(0));
+    ffull->FixParameter(1, pol1_after->GetParameter(1));
     ffull->SetParameter(2, 1.e+05);
-    ffull->FixParameter(3, fafter->GetParameter(0) + 0.5);
+    ffull->FixParameter(3, pol1_after->GetParameter(0) + 0.5);
     current_graph->Fit(ffull, "MEQ", "", vbd_guess + 0.5, vbd_guess + 2.5);
     ffull->SetParLimits(0, vbd_guess - 3, vbd_guess + 3);
     ffull->ReleaseParameter(1);
     ffull->SetParLimits(3, vbd_guess - 3, vbd_guess + 3);
     current_graph->Fit(ffull, "MEQ", "", vbd_guess + 0.5, vbd_guess + 2.5);
     // Set Parameters for show
-    fafter->SetParameter(0, ffull->GetParameter(0));
-    fafter->SetParameter(1, ffull->GetParameter(1));
+    pol1_after->SetParameter(0, ffull->GetParameter(0));
+    pol1_after->SetParameter(1, ffull->GetParameter(1));
     // Save result
-    get<0>(result) = ffull->GetParameter(0);
-    get<1>(result) = ffull->GetParError(0);
+    result[0] = ffull->GetParameter(0);
+    result[1] = ffull->GetParError(0);
     // Plot if requested
     if (graphics)
     {
         TCanvas *c1 = new TCanvas();
         gPad->SetLogy();
         current_graph->Draw("ALP");
-        current_graph->GetXaxis()->SetRangeUser(get<0>(result) - 5, get<0>(result) + 5);
-        fafter->SetRange(get<0>(result) - 5, get<0>(result) + 5);
-        fafter->SetLineColor(kBlue);
-        fafter->DrawCopy("SAME");
-        ffull->SetRange(get<0>(result) - 5, get<0>(result) + 5);
+        current_graph->GetXaxis()->SetRangeUser(result[0] - 5, result[0] + 5);
+        pol1_after->SetRange(result[0] - 5, result[0] + 5);
+        pol1_after->SetLineColor(kBlue);
+        pol1_after->DrawCopy("SAME");
+        ffull->SetRange(result[0] - 5, result[0] + 5);
         ffull->SetLineColor(kRed);
         ffull->DrawCopy("SAME");
         // Declare found Vbd value
         TLatex *l1 = new TLatex();
-        l1->DrawLatexNDC(0.2, 0.85, Form("V_{bd} = %.2f #pm %.2f", get<0>(result), get<1>(result)));
+        l1->DrawLatexNDC(0.2, 0.85, Form("V_{bd} = %.2f #pm %.2f", result[0], result[1]));
         // Save plot
         TString basedir = get_environment_variable("SIPM4EIC_WORKDIR");
         basedir += TString("/plots/vbdcheck/");
@@ -478,7 +752,7 @@ measure_breakdown_100(TGraphErrors *gTarget, float vbd_guess, bool graphics = fa
 }
 //
 template <int mode_select = 6>
-std::pair<float, float>
+std::array<float, 2>
 measure_breakdown(TGraphErrors *gTarget, float vbd_guess, bool graphics = true)
 {
     switch (mode_select)
@@ -516,7 +790,7 @@ measure_breakdown(TGraphErrors *gTarget, float vbd_guess, bool graphics = true)
 }
 //
 template <int mode_select = 1000>
-std::pair<float, float>
+std::array<float, 2>
 measure_breakdown(TGraphErrors *gTarget, float vbd_guess, int ncycles, float tolerance = 1.e-2)
 {
     auto initial_guess = measure_breakdown<mode_select>(gTarget, vbd_guess);
@@ -552,12 +826,12 @@ shift_with_vbd(TGraphErrors *gTarget, float vbd_guess)
 }
 //
 template <bool recalulate_vbd = true>
-std::pair<float, float>
+std::array<float, 2>
 overvoltage_ratio(TGraphErrors *gNumerator, TGraphErrors *gDenominator, float guess_vbd_num, float guess_vbd_den, float _xcoordinate)
 {
-    std::pair<float, float> result;
-    std::pair<float, float> numerator;
-    std::pair<float, float> denominator;
+    std::array<float, 2> result;
+    std::array<float, 2> numerator;
+    std::array<float, 2> denominator;
     if (recalulate_vbd)
     {
         gNumerator->SetName("gNumerator");
@@ -574,8 +848,8 @@ overvoltage_ratio(TGraphErrors *gNumerator, TGraphErrors *gDenominator, float gu
         numerator = eval_with_errors(new_numerator, _xcoordinate);
         denominator = eval_with_errors(new_denominator, _xcoordinate);
     }
-    get<0>(result) = get<0>(numerator) / get<0>(denominator);
-    get<1>(result) = get<0>(result) * ((get<1>(numerator) / get<0>(numerator)) * (get<1>(numerator) / get<0>(numerator)) + (get<1>(denominator) / get<0>(denominator)) * (get<1>(denominator) / get<0>(denominator)));
+    result[0] = get<0>(numerator) / get<0>(denominator);
+    result[1] = result[0] * ((get<1>(numerator) / get<0>(numerator)) * (get<1>(numerator) / get<0>(numerator)) + (get<1>(denominator) / get<0>(denominator)) * (get<1>(denominator) / get<0>(denominator)));
     return result;
 }
 //
@@ -584,9 +858,9 @@ TGraphErrors *
 overvoltage_ratio(TGraphErrors *gNumerator, TGraphErrors *gDenominator, float guess_vbd_num, float guess_vbd_den, std::vector<float> _xcoordinates)
 {
     TGraphErrors *result = new TGraphErrors();
-    std::pair<float, float> current_ratio;
-    std::pair<float, float> numerator;
-    std::pair<float, float> denominator;
+    std::array<float, 2> current_ratio;
+    std::array<float, 2> numerator;
+    std::array<float, 2> denominator;
     auto new_numerator = (TGraphErrors *)gNumerator->Clone("gNumerator");
     auto new_denominator = (TGraphErrors *)gDenominator->Clone("gDenominator");
     if (recalulate_vbd)
@@ -631,9 +905,9 @@ TGraphErrors *
 overvoltage_difference(TGraphErrors *gNumerator, TGraphErrors *gDenominator, float guess_vbd_num, float guess_vbd_den, std::vector<float> _xcoordinates)
 {
     TGraphErrors *result = new TGraphErrors();
-    std::pair<float, float> current_ratio;
-    std::pair<float, float> numerator;
-    std::pair<float, float> denominator;
+    std::array<float, 2> current_ratio;
+    std::array<float, 2> numerator;
+    std::array<float, 2> denominator;
     auto new_numerator = (TGraphErrors *)gNumerator->Clone("gNumerator");
     auto new_denominator = (TGraphErrors *)gDenominator->Clone("gDenominator");
     if (recalulate_vbd)
@@ -821,4 +1095,4 @@ namespace database
     {
         return breakdown_voltages;
     }
-}
+}*/
